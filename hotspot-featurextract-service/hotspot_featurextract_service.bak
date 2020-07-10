@@ -1,0 +1,813 @@
+# -*- coding: utf-8 -*-
+
+import sys
+sys.path.append('./featureExtract')
+
+# 自定义版本
+from _version import __version__
+
+# python
+import io
+import json
+
+# tornado
+import logging
+import tornado.escape
+import tornado.ioloop
+import tornado.web
+import tornado.httpserver
+import tornado.options
+from tornado.escape import json_decode
+
+# business logical
+from featureExtract.cnn_model import CNN_Model
+from featureExtract.config import Config
+from featureExtract.data_helper import Service_Dataset_HotSpot_title_encoding_artificial
+import datetime
+import re
+import requests
+import codecs
+
+# const
+# version
+VERSION = "0.1"
+# 定义常量
+VIEWS_KEYWORDS = ["认为","体现","意味","来看","观点","我们","事实上","专家","总体","强调","指出","表示","说","称","而言","提出"]
+SPECIAL_IDENTITIES = ['证券部人士', '投行人士', '投行业内人士', '创投界人士', '市场分析人士','私募分析人士']
+SECURITIES = []
+
+def read_file(filepath):
+    file = codecs.open(filepath, encoding = 'utf-8')
+    lines = file.readlines()
+    return lines
+
+from functools import wraps
+ 
+def singleton(cls):
+    instances = {}
+    @wraps(cls)
+    def getinstance(*args, **kw):
+        if cls not in instances:
+            instances[cls] = cls(*args, **kw)
+        return instances[cls]
+    return getinstance
+
+@singleton
+class tf_model_config(Config):
+    
+    def __init__(self):
+        
+        Config.__init__(self)
+        logging.info("tf_model_config inititial ... ")
+
+@singleton       
+class tf_model(CNN_Model):
+    
+    def __init__(self, config):
+        
+        CNN_Model.__init__(self, config)
+        logging.info("tf_model inititial ... ")
+        
+# config
+def parse_conf_file(config_file):
+    
+    config = {}
+    with io.open(config_file, 'r', encoding='utf8') as f:
+        config = json.load(f)
+    return config  
+
+class PredictHandler(tornado.web.RequestHandler):      
+
+    def get(self):  
+
+        try:
+            logging.info("get")
+            begin = datetime.datetime.now()
+            
+            list_of_doc = self.get_argument("list_of_doc")
+            list_of_doc = json_decode(list_of_doc)
+            
+            #preprocess ...
+            list_of_x, length_of_docs = self.doc_process_for_yh(list_of_doc)
+            logging.info("\nlist of x length: ---------> " + str(len(list_of_x)))
+            # predict...
+            self.handler_predict(list_of_x, length_of_docs)
+            
+            end = datetime.datetime.now()
+            
+            time = end - begin
+            
+            logging.info("\nget success! ------> " + "  time: " + str(time))
+            
+        except Exception as e:
+            logging.exception(e)
+    
+    def post(self):
+
+        try:
+            logging.info("post")
+            
+            begin = datetime.datetime.now()
+            
+            body_data = json_decode(self.request.body)
+            
+            list_of_doc = body_data
+            for doc in list_of_doc:
+                logging.info("\ndoc id: ---------> " + str(doc['id']))
+            
+            '''
+            #preprocess ...
+            list_of_x, length_of_docs = self.doc_process_for_yh(list_of_doc)
+            logging.info("\nlist of x length: ---------> " + str(len(list_of_x)))
+            # predict...
+            self.handler_predict(list_of_x, length_of_docs)
+            '''
+            #preprocess ...
+            new_list_of_doc, preds = self.doc_process_for_yh_rule(list_of_doc)
+            logging.info("\nlist of x length: ---------> " + str(len(preds)))
+            logging.info("\npreds: ---------> " + str(preds))
+            # predict...
+            self.handler_predict_rule(new_list_of_doc)
+            
+            
+            end = datetime.datetime.now()
+            
+            time = end - begin
+            logging.info("\npost success! ---------> " + "list_of_terms: " + str(len(list_of_doc)) + "  time: " + str(time))
+            
+        except Exception as e:
+            logging.exception(e)
+            
+    def doc_process(self, list_of_doc):
+        
+        list_of_x = []
+        length_of_docs = []
+        
+        for doc in list_of_doc:
+            
+            p_length = 0
+
+            title = doc['title']
+            content = doc['content']
+            content = content.split('</p></p><p><p>')
+            if len(content) < 100:
+                for p in content:
+                    
+                    p_ = p.replace('</p></p>','').replace('<p><p>','').strip()
+                    
+                    if p_ != "" and len(p_) > 10:
+                        temp_dic = {}
+                        temp_dic['title'] = title
+                        temp_dic['content'] = p_
+                        list_of_x.append(temp_dic)
+    
+                        p_length += 1
+            else:
+                temp_dic = {}
+                temp_dic['title'] = title
+                temp_dic['content'] = ""
+                list_of_x.append(temp_dic)
+
+                p_length += 1
+                    
+            length_of_docs.append(p_length)
+        
+        return list_of_x, length_of_docs
+    
+    def doc_process_for_yh(self, list_of_doc):
+        
+        list_of_x = []
+        length_of_docs = []
+        
+        for doc in list_of_doc:
+            
+            p_length = 0
+            
+            id = doc['id']
+            title = doc['title']
+            content = doc['content']
+            content = content.split('</p></p><p><p>')
+            
+            if len(content) < 100:
+                for p in content:
+                    
+                    p_ = p.replace('</p></p>','').replace('<p><p>','').strip()
+                    
+                    if p_ != "" and len(p_) > len(title):
+                        temp_dic = {}
+                        temp_dic['title'] = title
+                        temp_dic['content'] = p_
+                        temp_dic['id'] = id
+                        list_of_x.append(temp_dic)
+    
+                        p_length += 1
+            else:
+                temp_dic = {}
+                temp_dic['title'] = title
+                temp_dic['content'] = ""
+                temp_dic['id'] = id
+                list_of_x.append(temp_dic)
+
+                p_length += 1
+                
+                    
+            length_of_docs.append(p_length)
+        
+        return list_of_x, length_of_docs
+    
+    def doc_process_for_yh_rule(self, list_of_doc):
+        
+        preds = []
+        
+        def hanlp_segment(content):
+            
+            hanlp_url = "http://hanlp-rough-service:31001/hanlp/segment/rough?"
+           
+            data = {'content':content}
+    
+            response = requests_post(hanlp_url, data)
+            data = response['data']
+                
+            return data
+        
+        def requests_post(url, data):
+        
+            data = json.dumps(data)
+            #data = json.dumps(data).encode("UTF-8")
+            response = requests.post(url, data = data, headers={'Connection':'close'})
+            response = response.json()
+            
+            return response
+        
+        def removeAllTag(s):
+            s = re.sub('<[^>]+>','',s)
+            
+            return s
+        
+        def gs_rule(keywords, p_):
+            
+            count = 0
+            for word in keywords:
+                if word in p_:
+                    count +=1
+            if count >= int(len(keywords)*0.7):
+                return 1
+            
+            return 0
+        
+        def gd_rule(p_, keywords):
+            
+            if len(p_) < 500 and len(p_)> 15:
+                gs_condition = gs_rule(keywords, p_)
+                gd_keywords = ["认为","体现","意味","来看","观点","我们","事实上","专家","总体","强调","指出","表示","说","称"]
+                for word in gd_keywords:
+                    if word in p_ and gs_condition == 1:
+                        return 1
+                if '据' in p_ and '称' in p_ and gs_condition == 1:
+                    return 1
+                
+                hanlp_url = "http://hanlp-rough-service:31001/hanlp/segment/rough?"
+                try:
+                    segments = hanlp_segment(hanlp_url, p_)
+                except Exception as e:
+                    logging.exception(e)
+                    logging.exception("hanlpSegmentError： " + p_) 
+                
+                # 若段落中包含 “分析师名称”
+                for token in segments:
+                    if token['nature'] == 'fxs' and gs_condition == 1:
+                        logging.info("analysists： " + token['word']) 
+                        logging.info("opinion： " + p_) 
+                        return 1
+                    
+                return 0
+            return 0
+        
+        # 判断是否与「热点事件」相关
+        def hotspot_relativity_judge(content, keywords_or_topicwords):
+            
+            '''
+            判断是否与「热点事件」相关
+            1、利用某事件的抽象表示（keywords or topic words）来判断 content 是否与该事件相关
+            2、if len(keywords) == 1 or 2 时 topic 来判断 content 是否与该事件主题相关
+            3、当 len(keywords) >= 3 时，是否考虑 keywords 顺序，给予不同顺序词权重（平滑，评分）（暂未考虑）
+            '''
+            count = 0
+            for word in keywords_or_topicwords:
+                if word in content:
+                    count +=1
+            # 如果 keywords 只有一个词
+            if len(keywords_or_topicwords) == 1 and count == 1:
+                return 1
+            # 如果 keywords 有两个词，同时存在才能生效
+            if len(keywords_or_topicwords) == 2 and count == 2:
+                return 1
+            # 如果 keywords > 3个词， 占比 0.8, 3or4 in 4, 4or5 in 5, 4or5or6 in 6
+            if len(keywords_or_topicwords) > 2:
+                if count >= int(len(keywords_or_topicwords)*0.8):
+                    return 1
+        
+            return 0
+        
+        # 通过 title 判断是否为评论性文章，并给出作者或机构
+        def critical_report_judge(title, keywords):
+            
+            '''
+            根据观察的数据特点，根据标题判断是否为评论性文章
+            1、包含关键词（相对宽松）
+            2、包含券商机构或分析师
+            '''
+            
+            author = ''
+            if "：" in title:
+                count = 0
+                for word in keywords:
+                    if word in title:
+                        count +=1
+                if count >= int(len(keywords)*0.5):
+                    try:
+                        terms = hanlp_segment(title)
+                    except Exception as e:
+                        return 0, author
+                    
+                    # 先找 作者
+                    for term in terms:
+                        if term['nature'] == 'fxs' or term['word'] == '巴曙松':
+                            if term['word'] != '李克强' and term['word'] != '彭博':
+                                author = term['word']
+                                #print(author)
+                                logging.info("critical_report_analysist： " + author) 
+                                return 1, author
+                    # 再找 券商  
+                    for security in SECURITIES:
+                        if security in title:
+                            author = security
+                            #print(author)
+                            logging.info("critical_report_analysist： " + author) 
+                            return 1, author
+            
+            return 0, author
+        
+        # 通过 content 判断是否为观点，并给出作者或机构
+        def point_view_judge(content, keywords_or_topicwords):
+            
+            '''
+            判断 content 是否为观点
+            1、如果为 keywords，则严格
+            2、如果为 topic words，则宽松
+            '''
+            
+            author = ''
+            if len(content) < 500 and len(content)> 15 and "记者" not in content:
+                relativity = hotspot_relativity_judge(content, keywords_or_topicwords)
+                c = 0
+                for word in VIEWS_KEYWORDS:
+                    if word in content:
+                        c+=1
+                        break
+                    
+                if relativity == 1 and c > 0:
+                    try:
+                        terms = hanlp_segment(content)
+                    except Exception as e:
+                        print(e)
+                        print("hanlpSegmentError： " + content) 
+                        return 0, author
+                        
+                    # 先找 作者
+                    for term in terms:
+                        if term['nature'] == 'fxs' or term['word'] == '巴曙松':
+                            if term['word'] != '李克强' and term['word'] != '彭博':
+                                author = term['word']
+                                #print(author)
+                                logging.info("point_view_analysist： " + author) 
+                                return 1, author
+                        
+                    # 再找 券商  
+                    for security in SECURITIES:
+                        if security in content:
+                            author = security
+                            #print(author)
+                            logging.info("point_view_analysist： " + author) 
+                            return 1, author
+                        
+                     # 再找特殊身份人士 如 “投行人士”
+                    for special_identity in SPECIAL_IDENTITIES:
+                        if special_identity in content:
+                            author = special_identity
+                            #print(author)
+                            logging.info("point_view_analysist： " + author) 
+                            return 1
+                        
+            return 0, author
+
+
+            
+        new_list_of_doc = []
+        
+        for doc in list_of_doc:
+            
+            preds_per = []
+            
+            id = doc['id']
+            logging.info('doc_id: ' + str(id))
+            title = doc['title']
+            content = doc['content']
+            keywords = doc['keywords']
+            topic_words = keywords[0:1]
+            if 'summary' in doc.keys():
+                summary = doc['summary']
+            else:
+                summary = ''
+            
+            if doc["dataSource"] == "CRAWL":
+                content = content.split('</p><p>')
+            else:
+                content = content.split('</p></p><p><p>')
+            
+            # 处理掉 异常 文章，段落特多的
+            if len(content) < 100:
+                
+                crj,_ = critical_report_judge(title, keywords) 
+                hrj  = hotspot_relativity_judge(title, keywords)
+                hrj_ = hotspot_relativity_judge(title, topic_words)
+                
+                # 一个 doc 只有一个 概述
+                gs_condition = 0
+                
+                # 如果爬取到了“概述”
+                if len(summary) !=0:
+                    summary_ = removeAllTag(summary)
+                    
+                    if gs_rule(keywords, summary_) == 1:
+                        logging.info('report_summary_keywordsrelative')
+                        logging.info('summary: ' + summary_)
+                        temp_dic = {}
+                        temp_dic['id'] = id
+                        temp_dic['content'] = summary_
+                        temp_dic['label'] = "事件概述"
+                        new_list_of_doc.append(temp_dic)
+                        gs_condition += 1
+                        preds_per.append(9)
+                
+                # 每个文章的每一段作处理
+                for i in range(0, len(content)):
+                    
+                    p = content[i]
+                    p_ = removeAllTag(p)
+                    
+                    # 如果未能爬取到概述
+                    if gs_condition == 0:
+                        if i == 0 or i == 1:
+                            condition = gs_rule(keywords, p_)
+                            if p_ != "" and len(p_) > len(title) and condition == 1:
+                                logging.info('report_nosummary_keywordsrelative')
+                                logging.info('p_: ' + p_)
+                                temp_dic = {}
+                                temp_dic['id'] = id
+                                temp_dic['content'] = p_
+                                temp_dic['label'] = "事件概述"
+                                new_list_of_doc.append(temp_dic)
+                                gs_condition += 1
+                                preds_per.append(1)
+                                continue
+                    
+                    '''
+                    # 观点不限制段落
+                    condition = gd_rule(p_, keywords)
+                    if condition == 1:
+                        temp_dic = {}
+                        temp_dic['id'] = id
+                        temp_dic['content'] = p_
+                        temp_dic['label'] = "事件影响"
+                        new_list_of_doc.append(temp_dic)
+                        preds_per.append(2)
+                        continue
+                    '''
+                    
+                    preds_per.append(0)
+                    
+                    
+                # 观点抽取
+                # 分成两个类型处理
+                # 情况1、通过标题来判断是否为评论性文章
+                
+                if crj == 1:
+                    # 提取出文章的摘要
+                    if summary != '':
+                        summary = removeAllTag(summary)
+                        hrj = hotspot_relativity_judge(summary, keywords)
+                        if hrj == 1:
+                            logging.info('critical_report_summary_keywordsrelative')
+                            logging.info('《' + title + '》') 
+                            logging.info('summary: ' + summary) 
+                            
+                            temp_dic = {}
+                            temp_dic['id'] = id
+                            temp_dic['content'] = summary
+                            temp_dic['label'] = "事件影响"
+                            new_list_of_doc.append(temp_dic)
+                            preds_per.append(2)
+                            
+                        else:
+                            logging.info('critical_report_summary_unrelative')
+                            logging.info('《' + title + '》') 
+                            logging.info('summary: ' + summary) 
+                            
+                            temp_dic = {}
+                            temp_dic['id'] = id
+                            temp_dic['content'] = summary
+                            temp_dic['label'] = "事件影响"
+                            new_list_of_doc.append(temp_dic)
+                            preds_per.append(2)
+                            
+                    #或是随机抽取出一个观点段
+                    else:
+                        for i in range(0, len(content)):
+                            p = content[i]
+                            p_ = removeAllTag(p)
+                    
+                            pvj,_ = point_view_judge(p_, keywords)
+                            pvj_,_ = point_view_judge(p_, topic_words)
+                            if pvj == 1:
+                                logging.info('critical_report_nosummary_keywordsrelative')
+                                logging.info('《' + title + '》') 
+                                logging.info('p_: ' + p_)
+                                
+                                temp_dic = {}
+                                temp_dic['id'] = id
+                                temp_dic['content'] = p_
+                                temp_dic['label'] = "事件影响"
+                                new_list_of_doc.append(temp_dic)
+                                preds_per.append(2)
+                                
+                            elif pvj_ == 1:
+                                logging.info('critical_report_nosummary_topic_wordsrelative')
+                                logging.info('《' + title + '》') 
+                                logging.info('p_: ' + p_)
+                                
+                                temp_dic = {}
+                                temp_dic['id'] = id
+                                temp_dic['content'] = p_
+                                temp_dic['label'] = "事件影响"
+                                new_list_of_doc.append(temp_dic)
+                                preds_per.append(2)
+                                
+                            else:
+                                logging.info('critical_report_nosummary_just_title')
+                                logging.info('《' + title + '》') 
+
+                else:
+                    
+                    # 还应该在进一步判断标题尽管没有分析师名字，但包含了事件的大多数关键词，特别关注
+                    
+                    # 事件强相关标题的资讯中包含次相关的观点
+                    if hrj  == 1:
+                        for i in range(0, len(content)):
+                            p = content[i]
+                            p_ = removeAllTag(p)
+                            
+                            pvj_,_ = point_view_judge(p_, topic_words)
+                            if pvj_ == 1:
+                                logging.info('stong_relative_report_p_topicwordsrelative')
+                                logging.info('《' + title + '》') 
+                                logging.info('p_: ' + p_)
+                                
+                                temp_dic = {}
+                                temp_dic['id'] = id
+                                temp_dic['content'] = p_
+                                temp_dic['label'] = "事件影响"
+                                new_list_of_doc.append(temp_dic)
+                                preds_per.append(2)
+                                
+                    # 事件相关主题的资讯标题，可能会包含强相关观点或主题观点
+                    elif hrj_ == 1:
+                        for i in range(0, len(content)):
+                            p = content[i]
+                            p_ = removeAllTag(p)
+                            pvj,_ = point_view_judge(p_, keywords)
+                            #pvj_ = topic_report_gd_rule(p_, topic_words)
+                            if pvj == 1:
+                                logging.info('weak_relative_report_p_keywordsrelative')
+                                logging.info('《' + title + '》') 
+                                logging.info('p_: ' + p_)
+                                
+                                temp_dic = {}
+                                temp_dic['id'] = id
+                                temp_dic['content'] = p_
+                                temp_dic['label'] = "事件影响"
+                                new_list_of_doc.append(temp_dic)
+                                preds_per.append(2)
+                    else:
+                        for i in range(0, len(content)):
+                            p = content[i]
+                            p_ = removeAllTag(p)
+                            pvj,_ = point_view_judge(p_, keywords)
+                            if pvj == 1:
+                                logging.info('non_relative_report_p')
+                                logging.info('《' + title + '》') 
+                                logging.info('p_: ' + p_)
+                                
+                                temp_dic = {}
+                                temp_dic['id'] = id
+                                temp_dic['content'] = p_
+                                temp_dic['label'] = "事件影响"
+                                new_list_of_doc.append(temp_dic)
+                                preds_per.append(2)
+
+                    
+                    
+                
+                preds.append(preds_per)
+
+            else:
+                preds.append(404)
+
+        return new_list_of_doc, preds
+    
+    def handler_predict_rule(self, new_list_of_doc):
+        
+        result_json = json.dumps(new_list_of_doc, ensure_ascii=False)
+        
+        self.write(result_json) 
+        logging.info('writ result json finisehd!')
+        
+    def handler_predict(self, list_of_x, length_of_docs):
+        
+        # tensorflow model initial...
+        # get singleton instance again...
+        modelConfig = tf_model_config()
+        featureExtractModel = tf_model(modelConfig)
+        
+        try:
+            '''
+            # terms：
+            #    [term, term, ... , term]
+            # 利用 modelConfig.processing_x 将 word
+            # 对应 vocab 的 idx
+            # class initial ...
+            '''
+            logging.info('data preprocess ...word to ids')
+            test = Service_Dataset_HotSpot_title_encoding_artificial(list_of_x, modelConfig.processing_x)
+            
+        except Exception as e:
+            logging.exception(e)
+        
+        try:
+            '''
+            # test:
+                data set, type = iterator
+                
+            # 1. batch in batches
+                words in service_predict_minibatches(test, predict_batch_size) 
+                
+            # 2. batch process...
+                predict_batch(words)
+                    1. get_feed_dict()
+                        pad_sequences()
+                            word_ids, sequence_lengths, ansj_tag_ids
+                            
+                    2. labels_pred = sess.run(self.marginals_op, feed_dict=fd)
+            
+            '''
+            labels_preds = featureExtractModel.service_predicts(test)
+            
+        except Exception as e:
+            logging.exception(e)
+            
+        # 对 workflow 的输出进一步处理
+        def combine(list_of_x, labels_preds, length_of_docs):
+            
+            new_list_of_doc = []
+            
+            begin = 0
+            
+            for length in length_of_docs:
+                # 每个 doc
+                seg_list_of_x = list_of_x[begin: begin+length]
+                seg_labels_preds = labels_preds[begin: begin+length]
+                
+                begin += length
+                
+                title = ""
+                abstracts = []
+                views = []
+                for x, pred in zip(seg_list_of_x, seg_labels_preds):
+                    
+                    title = x['title']
+                    
+                    if int(pred) == 1:
+                        abstracts.append(x['content'])
+                        continue
+                    
+                    if int(pred) == 2:
+                        views.append(x['content'])
+                        continue
+                
+                temp_dic = {}
+                temp_dic['title'] = title
+                temp_dic['abstracts'] = abstracts
+                temp_dic['views'] = views
+                
+                new_list_of_doc.append(temp_dic)
+            
+            return new_list_of_doc
+        
+        '''
+        new_list_of_doc = combine(list_of_x, labels_preds, length_of_docs)
+              
+        result_json = json.dumps(new_list_of_doc, ensure_ascii=False)
+        
+        self.write(result_json) 
+        logging.info('writ result json finisehd!')
+        '''
+            
+        # 对 workflow 的输出进一步处理
+        def combine_for_yh(list_of_x, labels_preds, length_of_docs):
+            
+            new_list_of_feature = []
+            
+            for i in range(0,len(list_of_x)):
+                
+                pred = labels_preds[i]
+                
+                temp_dic = {}
+                temp_dic['id'] = list_of_x[i]['id']
+                
+                if int(pred) == 1:
+                    temp_dic['content'] = list_of_x[i]['content']
+                    temp_dic['label'] = "事件概述"
+                    new_list_of_feature.append(temp_dic)
+                    continue
+                    
+                if int(pred) == 2:
+                    temp_dic['content'] = list_of_x[i]['content']
+                    temp_dic['label'] = "事件影响"
+                    new_list_of_feature.append(temp_dic)
+                    continue
+            
+            return new_list_of_feature
+
+        new_list_of_doc = combine_for_yh(list_of_x, labels_preds, length_of_docs)
+              
+        result_json = json.dumps(new_list_of_doc, ensure_ascii=False)
+        
+        self.write(result_json) 
+        logging.info('writ result json finisehd!')
+       
+    
+class Application(tornado.web.Application):
+    
+    def __init__(self, config):
+        handlers = [
+            (config['url'], PredictHandler), 
+        ]
+        settings = dict(
+            debug = bool(config['debug']),
+        )
+        tornado.web.Application.__init__(self, handlers, **settings)
+
+        
+def main(argv):
+    
+    if sys.version_info < (3,):
+        reload(sys)
+        sys.setdefaultencoding("utf-8")
+   
+    if VERSION != __version__:
+        print("version error!")
+        logging.info("version error!")
+        exit(-1)
+    
+    if len(argv) < 2:
+        print('arg error.')
+        exit(-2)  
+        
+    config = parse_conf_file(argv[1])
+    tornado.options.parse_config_file(config['log_config_file'])
+    
+    logging.info("Server Inititial ... ")
+    
+    # initial model
+    modelConfig = tf_model_config()
+    featureExtractModel = tf_model(modelConfig)
+    featureExtractModel.build()
+    featureExtractModel.restore_session(modelConfig.dir_model)
+    logging.info("tf_model inititial success! ")
+    
+    securities_name = read_file('securities_name.txt')
+    for x in securities_name:
+        SECURITIES.append(x.strip())
+    logging.info('所有券商个数： '+ str(len(SECURITIES)))
+    
+    app = Application(config)
+    server = tornado.httpserver.HTTPServer(app)
+    server.bind(config['port'])
+    server.start(config['process_num'])
+    logging.info("Server Inititial Success! ")
+    print("Server Inititial Success! ")
+    tornado.ioloop.IOLoop.current().start()
+
+if __name__ == "__main__":
+    
+    main(sys.argv)
